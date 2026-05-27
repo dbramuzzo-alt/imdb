@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 import os
 import re
-import json
 
 # Nome del file dove salveremo i film
 DB_FILE = "film_db.csv"
@@ -19,55 +17,45 @@ def carica_dati():
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# Funzione ROBUSTA per estrarre i dati di un film da IMDb
-def recupera_dati_imdb(id_imdb):
-    url = f"https://www.imdb.com/title/{id_imdb}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+# Funzione per estrarre i dati usando OMDb API (Super stabile, zero blocchi)
+def recupera_dati_omdb(id_imdb, api_key):
+    # OMDb vuole l'ID puro senza spazi
+    url = f"http://www.omdbapi.com/?i={id_imdb}&apikey={api_key}"
     
     try:
-        risposta = requests.get(url, headers=headers, timeout=10)
+        risposta = requests.get(url, timeout=10)
         if risposta.status_code != 200:
             return None
             
-        soup = BeautifulSoup(risposta.text, "html.parser")
+        dati = risposta.json()
         
-        # Cerchiamo il blocco di dati strutturati JSON-LD che IMDb usa per Google
-        script_tag = soup.find("script", type="application/ld+json")
-        
-        if script_tag:
-            dati_json = json.loads(script_tag.string)
+        if dati.get("Response") == "True":
+            titolo = dati.get("Title", "Titolo Sconosciuto")
             
-            # Estraiamo il titolo
-            titolo = dati_json.get("name", "Titolo Sconosciuto")
+            # Gestione del voto IMDb
+            voto_str = dati.get("imdbRating", "0.0")
+            voto = float(voto_str) if voto_str != "N/A" else 0.0
             
-            # Estraiamo le valutazioni
-            aggregate_rating = dati_json.get("aggregateRating", {})
-            voto = float(aggregate_rating.get("ratingValue", 0.0)) if aggregate_rating else 0.0
-            num_voti = int(aggregate_rating.get("ratingCount", 0)) if aggregate_rating else 0
+            # Gestione del numero di voti (rimuovendo le virgole americane, es: "1,245,112" -> 1245112)
+            voti_str = dati.get("imdbVotes", "0").replace(",", "")
+            num_voti = int(voti_str) if voti_str != "N/A" else 0
             
             return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
-            
-        # Fallback nel caso in cui il JSON-LD non sia presente
-        titolo_tag = soup.find("meta", property="og:title")
-        titolo = titolo_tag["content"].split(" (")[0] if titolo_tag else "Sconosciuto"
-        return {"Titolo": titolo, "Valutazione IMDb": 0.0, "Numero Voti": 0}
-        
+        else:
+            return None
     except Exception as e:
         return None
 
 # Funzione per aggiornare la lista completa
-def aggiorna_valutazioni(df):
-    if df.empty:
+def aggiorna_valutazioni(df, api_key):
+    if df.empty or not api_key:
         return df
     
-    progress_text = "Aggiornamento valutazioni da IMDb..."
+    progress_text = "Aggiornamento valutazioni tramite API..."
     barrita = st.progress(0, text=progress_text)
     
     for index, row in df.iterrows():
-        dati_aggiornati = recupera_dati_imdb(row['id_imdb'])
+        dati_aggiornati = recupera_dati_omdb(row['id_imdb'], api_key)
         if dati_aggiornati:
             df.at[index, 'Valutazione IMDb'] = dati_aggiornati['Valutazione IMDb']
             df.at[index, 'Numero Voti'] = dati_aggiornati['Numero Voti']
@@ -82,15 +70,23 @@ def aggiorna_valutazioni(df):
 
 # --- INTERFACCIA STREAMLIT ---
 st.title("🎬 Il mio Tracker di Film IMDb")
-st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni in tempo reale!")
+st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni senza blocchi!")
+
+# Configurazione API Key nella barra laterale o in alto
+st.sidebar.subheader("🔑 Configurazione")
+api_key = st.sidebar.text_input("Inserisci la tua OMDb API Key:", type="password")
+
+if not api_key:
+    st.info("👈 Per iniziare, inserisci la tua API Key gratuita di OMDb nella barra laterale sinistra.")
+    st.stop()
 
 df_film = carica_dati()
 
-# Aggiornamento automatico all'avvio
+# Aggiornamento automatico all'avvio (solo se l'API key è presente)
 if "aggiornato" not in st.session_state:
     if not df_film.empty:
         with st.spinner("Aggiornamento dati all'avvio..."):
-            df_film = aggiorna_valutazioni(df_film)
+            df_film = aggiorna_valutazioni(df_film, api_key)
     st.session_state["aggiornato"] = True
 
 # --- SEZIONE AGGIUNTA FILM ---
@@ -99,7 +95,6 @@ link_imdb = st.text_input("Incolla il link o l'ID da IMDb (es. tt0111161):")
 
 if st.button("Aggiungi Film"):
     if link_imdb:
-        # Estrae l'ID (cerca 'tt' seguito da numeri)
         match = re.search(r'(tt\d+)', link_imdb)
         if match:
             id_estratto = match.group(1)
@@ -107,8 +102,8 @@ if st.button("Aggiungi Film"):
             if id_estratto in df_film['id_imdb'].values:
                 st.info("Questo film è già presente nella tua lista!")
             else:
-                with st.spinner("Recupero informazioni da IMDb..."):
-                    dati_film = recupera_dati_imdb(id_estratto)
+                with st.spinner("Recupero informazioni tramite API..."):
+                    dati_film = recupera_dati_omdb(id_estratto, api_key)
                     if dati_film:
                         nuovo_film = {
                             "id_imdb": id_estratto,
@@ -122,9 +117,9 @@ if st.button("Aggiungi Film"):
                         st.success(f"Aggiunto con successo: **{dati_film['Titolo']}**!")
                         st.rerun()
                     else:
-                        st.error("Impossibile connettersi a IMDb. Riprova tra qualche istante.")
+                        st.error("Impossibile trovare il film. Controlla che l'ID sia corretto e che l'API Key sia attiva.")
         else:
-            st.error("Non ho trovato un ID IMDb valido. Assicurati che nel link ci sia una parte che inizia con 'tt' seguita da numeri.")
+            st.error("Non ho trovato un ID IMDb valido (es. tt0111161).")
     else:
         st.warning("Inserisci un link o un ID prima di premere il bottone.")
 
@@ -145,7 +140,7 @@ else:
     
     if st.button("🔄 Forza Aggiornamento Ora"):
         with st.spinner("Aggiornamento in corso..."):
-            df_film = aggiorna_valutazioni(df_film)
+            df_film = aggiorna_valutazioni(df_film, api_key)
             st.success("Classifica aggiornata!")
             st.rerun()
-    
+                        

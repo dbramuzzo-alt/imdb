@@ -107,4 +107,35 @@ if st.button("Aggiungi Film"):
                         "Numero Voti": dati_film["Numero Voti"]
                     }
                     df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
-                    
+                    df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
+                    salva_dati(df_film)
+                    st.success(f"Aggiunto direttamente da IMDb: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
+                    st.rerun()
+                else:
+                    st.error("Errore di estrazione. Verifica l'ID del film o attendi che ScraperAPI elabori la coda.")
+        else:
+            st.error("ID IMDb non valido.")
+    else:
+        st.warning("Inserisci un link.")
+
+st.divider()
+
+# --- VISUALIZZAZIONE DATI ---
+st.subheader("📊 Classifica Ufficiale IMDb")
+
+if df_film.empty:
+    st.info("La tua lista è vuota. Aggiungi il tuo primo film qui sopra!")
+else:
+    tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
+    tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
+        lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
+    )
+    
+    st.dataframe(tabella_da_mostrare, use_container_width=True)
+    
+    if st.button("🔄 Forza Aggiornamento Ora"):
+        with st.spinner("Aggiornamento in corso..."):
+            df_film = aggiorna_valutazioni(df_film, SCRAPER_API_KEY)
+            st.success("Classifica aggiornata!")
+            st.rerun()
+            

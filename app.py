@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import re
+import json
 
 # Nome del file dove salveremo i film
 DB_FILE = "film_db.csv"
@@ -18,60 +19,43 @@ def carica_dati():
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# Funzione per estrarre i dati di un film da IMDb tramite Web Scraping
+# Funzione ROBUSTA per estrarre i dati di un film da IMDb
 def recupera_dati_imdb(id_imdb):
     url = f"https://www.imdb.com/title/{id_imdb}/"
-    # IMDb richiede un User-Agent realistico per non bloccare la richiesta
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     
-    risposta = requests.get(url, headers=headers)
-    if risposta.status_code != 200:
-        return None
-        
-    soup = BeautifulSoup(risposta.text, "html.parser")
-    
     try:
-        # Estrai il titolo dal tag <title> o dagli open graph
+        risposta = requests.get(url, headers=headers, timeout=10)
+        if risposta.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(risposta.text, "html.parser")
+        
+        # Cerchiamo il blocco di dati strutturati JSON-LD che IMDb usa per Google
+        script_tag = soup.find("script", type="application/ld+json")
+        
+        if script_tag:
+            dati_json = json.loads(script_tag.string)
+            
+            # Estraiamo il titolo
+            titolo = dati_json.get("name", "Titolo Sconosciuto")
+            
+            # Estraiamo le valutazioni
+            aggregate_rating = dati_json.get("aggregateRating", {})
+            voto = float(aggregate_rating.get("ratingValue", 0.0)) if aggregate_rating else 0.0
+            num_voti = int(aggregate_rating.get("ratingCount", 0)) if aggregate_rating else 0
+            
+            return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
+            
+        # Fallback nel caso in cui il JSON-LD non sia presente
         titolo_tag = soup.find("meta", property="og:title")
-        if titolo_tag:
-            titolo = titolo_tag["content"].split(" (")[0] # Rimuove l'anno dal titolo (es. "Inception (2010)" -> "Inception")
-        else:
-            titolo = soup.find("title").text.replace(" - IMDb", "")
-            
-        # Trova il voto (cercando nello schema JSON strutturato o nei tag specifici di IMDb)
-        voto_tag = soup.find("span", {"class": "sc-bde20123-1 cCNeUe"}) # Classe standard attuale per il rating
-        if voto_tag:
-            voto = float(voto_tag.text)
-        else:
-            # Fallback se cambiano le classi
-            voto_meta = soup.find("meta", itemprop="ratingValue")
-            voto = float(voto_meta["content"]) if voto_meta else 0.0
-
-        # Trova il numero di voti
-        voti_count_tag = soup.find("div", {"class": "sc-bde20123-3 gZYLgH"}) # Classe standard attuale per il numero voti
-        if voti_count_tag:
-            testo_voti = voti_count_tag.text
-            # Converte formati come "1.2M" o "450K" in numeri interi approssimativi
-            moltiplicatore = 1
-            if "M" in testo_voti:
-                moltiplicatore = 1_000_000
-                testo_voti = testo_voti.replace("M", "")
-            elif "K" in testo_voti:
-                moltiplicatore = 1_000
-                testo_voti = testo_voti.replace("K", "")
-            
-            # Pulisce il testo lasciando solo numeri e punti/virgole decimali
-            testo_voti = re.sub(r'[^\d.]', '', testo_voti.replace(',', '.'))
-            num_voti = int(float(testo_voti) * moltiplicatore)
-        else:
-            num_voti = 0
-
-        return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
+        titolo = titolo_tag["content"].split(" (")[0] if titolo_tag else "Sconosciuto"
+        return {"Titolo": titolo, "Valutazione IMDb": 0.0, "Numero Voti": 0}
+        
     except Exception as e:
-        # Se fallisce il parsing avanzato, restituisce dati vuoti ma evita il crash
         return None
 
 # Funzione per aggiornare la lista completa
@@ -111,11 +95,11 @@ if "aggiornato" not in st.session_state:
 
 # --- SEZIONE AGGIUNTA FILM ---
 st.subheader("➕ Aggiungi un nuovo film")
-link_imdb = st.text_input("Incolla il link del film (es. https://www.imdb.com/title/tt0111161/) o l'ID (tt0111161):")
+link_imdb = st.text_input("Incolla il link o l'ID da IMDb (es. tt0111161):")
 
 if st.button("Aggiungi Film"):
     if link_imdb:
-        # Estrae l'ID usando una regex per prendere la parte "tt" seguita da numeri
+        # Estrae l'ID (cerca 'tt' seguito da numeri)
         match = re.search(r'(tt\d+)', link_imdb)
         if match:
             id_estratto = match.group(1)
@@ -138,9 +122,9 @@ if st.button("Aggiungi Film"):
                         st.success(f"Aggiunto con successo: **{dati_film['Titolo']}**!")
                         st.rerun()
                     else:
-                        st.error("Impossibile recuperare il film. Verifica che il link o l'ID siano corretti.")
+                        st.error("Impossibile connettersi a IMDb. Riprova tra qualche istante.")
         else:
-            st.error("Non ho trovato un ID IMDb valido (deve contenere 'tt' seguito da numeri).")
+            st.error("Non ho trovato un ID IMDb valido. Assicurati che nel link ci sia una parte che inizia con 'tt' seguita da numeri.")
     else:
         st.warning("Inserisci un link o un ID prima di premere il bottone.")
 
@@ -154,7 +138,7 @@ if df_film.empty:
 else:
     tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
     
-    # Formatta il numero di voti inserendo i punti per i decimali (es: 1.250.000)
+    # Formatta il numero di voti inserendo i punti (es: 1.250.000)
     tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(lambda x: f"{int(x):,}".replace(",", "."))
     
     st.dataframe(tabella_da_mostrare, use_container_width=True)
@@ -164,4 +148,4 @@ else:
             df_film = aggiorna_valutazioni(df_film)
             st.success("Classifica aggiornata!")
             st.rerun()
-                          
+    

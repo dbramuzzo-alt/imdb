@@ -88,4 +88,67 @@ st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni senza blo
 
 df_film = carica_dati()
 
-# Aggior
+# Aggiornamento automatico all'avvio
+if "aggiornato" not in st.session_state:
+    if not df_film.empty:
+        with st.spinner("Aggiornamento dati all'avvio..."):
+            df_film = aggiorna_valutazioni(df_film, API_KEY)
+    st.session_state["aggiornato"] = True
+
+# --- SEZIONE AGGIUNTA FILM ---
+st.subheader("➕ Aggiungi un nuovo film")
+link_imdb = st.text_input("Incolla il link o l'ID da IMDb (es. tt0111161):")
+
+if st.button("Aggiungi Film"):
+    if link_imdb:
+        match = re.search(r'(tt\d+)', link_imdb)
+        if match:
+            id_estratto = match.group(1)
+            
+            # Rimuoviamo il vecchio film se presente per forzare la sovrascrittura pulita
+            df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
+            
+            with st.spinner("Recupero informazioni tramite API..."):
+                dati_film = recupera_dati_omdb(id_estratto, API_KEY)
+                if dati_film:
+                    nuovo_film = {
+                        "id_imdb": id_estratto,
+                        "Titolo": dati_film["Titolo"],
+                        "Valutazione IMDb": dati_film["Valutazione IMDb"],
+                        "Numero Voti": dati_film["Numero Voti"]
+                    }
+                    df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
+                    df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
+                    salva_dati(df_film)
+                    st.success(f"Aggiunto: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
+                    st.rerun()
+                else:
+                    st.error("Impossibile recuperare i dettagli del film. L'ID potrebbe essere errato.")
+        else:
+            st.error("Non ho trovato un ID IMDb valido (es. tt0111161).")
+    else:
+        st.warning("Inserisci un link o un ID prima di premere il bottone.")
+
+st.divider()
+
+# --- VISUALIZZAZIONE DATI ---
+st.subheader("📊 La tua classifica")
+
+if df_film.empty:
+    st.info("La tua lista è vuota. Aggiungi il tuo primo film qui sopra!")
+else:
+    tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
+    
+    # Formattazione sicura del numero di voti
+    tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
+        lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
+    )
+    
+    st.dataframe(tabella_da_mostrare, use_container_width=True)
+    
+    if st.button("🔄 Forza Aggiornamento Ora"):
+        with st.spinner("Aggiornamento in corso..."):
+            df_film = aggiorna_valutazioni(df_film, API_KEY)
+            st.success("Classifica aggiornata!")
+            st.rerun()
+                

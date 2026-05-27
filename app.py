@@ -1,50 +1,42 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+from imdb import Cinemagoer
 
-st.title("🧪 Laboratorio di Test IMDb")
-st.write("Questo script serve a verificare cosa vede esattamente il server quando interroga IMDb.")
+st.title("🧪 Test Infallibile con Cinemagoer (Gratis e Senza Chiavi)")
+st.write("Verifichiamo se riusciamo a leggere i 35K voti senza usare proxy o carte di credito.")
 
-SCRAPER_API_KEY = "d09a651a095f55f0bd28f15a1bad8bd6"
-
-# Un ID standard universale (es. Il Cavaliere Oscuro) per essere sicuri che esista
-id_test = st.text_input("Inserisci l'ID IMDb da testare:", value="tt0468569")
+# ID di The Mandalorian & Grogu (senza il 'tt', solo i numeri)
+id_input = st.text_input("Inserisci solo i numeri dell'ID IMDb (es. 30825738):", value="30825738")
 
 if st.button("Avvia Test di Estrazione"):
-    url_bersaglio = f"https://www.imdb.com/title/{id_test}/"
-    url_proxy = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url_bersaglio}"
-    
-    with st.spinner("Chiamata a ScraperAPI in corso..."):
+    with st.spinner("Connessione diretta ai server IMDb..."):
         try:
-            risposta = requests.get(url_proxy, timeout=30)
+            # Inizializziamo il motore di Cinemagoer
+            ia = Cinemagoer()
             
-            st.subheader("1. Stato della Risposta")
-            st.write(f"Codice di stato HTTP: `{risposta.status_code}`")
+            # Scarichiamo i dati del film tramite il suo ID numerico
+            film = ia.get_movie(id_input)
             
-            if risposta.status_code == 200:
-                st.success("✅ Il server ha risposto con successo!")
-                
-                soup = BeautifulSoup(risposta.text, "html.parser")
-                
-                st.subheader("2. Controllo Titolo della Pagina Browser")
-                if soup.title:
-                    st.code(soup.title.text)
-                else:
-                    st.warning("Nessun tag <title> trovato.")
-                
-                st.subheader("3. Controllo Meta-Tag Social (OpenGraph)")
-                meta_title = soup.find("meta", property="og:title")
-                if meta_title:
-                    st.code(meta_title.get("content", "Tag presente ma vuoto"))
-                else:
-                    st.warning("Nessun meta-tag og:title trovato.")
-                    
-                st.subheader("4. Primi 1000 caratteri dell'HTML ricevuto")
-                st.text(risposta.text[:1000])
-                
-            else:
-                st.error(f"❌ ScraperAPI ha risposto con un errore. Messaggio: {risposta.text}")
-                
+            st.success("✅ Connessione riuscita! I server di IMDb hanno risposto.")
+            
+            st.subheader("Dati Estratti:")
+            
+            # Estraiamo le informazioni principali
+            titolo = film.get('title', 'Titolo Sconosciuto')
+            voto = film.get('rating', 0.0)
+            voti = film.get('votes', 0)
+            
+            st.write(f"🎥 **Titolo:** {titolo}")
+            st.write(f"⭐ **Voto IMDb:** {voto}")
+            st.write(f"📊 **Numero di Voti:** {voti:,}".replace(",", "."))
+            
+            # Mostriamo un'anteprima dei dati grezzi per sicurezza
+            st.subheader("Anteprima dati tecnici ricevuti:")
+            st.write({
+                "titolo": titolo,
+                "rating": voto,
+                "votes": voti
+            })
+            
         except Exception as e:
-            st.error(f"💥 Errore critico nel codice Python: {e}")
+            st.error(f"💥 Errore durante l'estrazione: {e}")
             

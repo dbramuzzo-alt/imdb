@@ -1,58 +1,74 @@
 import streamlit as st
 import requests
+import json
 
-st.title("🧪 Test Canale Nativo IMDb (App Mobile)")
-st.write("Verifichiamo se riusciamo a leggere i voti reali simulando l'app ufficiale per smartphone.")
+st.title("🧪 Test Avanzato API Interne IMDb")
+st.write("Interroghiamo il server dei dettagli per estrarre la valutazione e il numero reale dei voti.")
 
-# ID di The Mandalorian & Grogu (inseriamo l'ID completo con la 'tt')
 id_input = st.text_input("Inserisci l'ID IMDb completo (es. tt30825738):", value="tt30825738")
 
-if st.button("Avvia Test di Estrazione"):
-    # Questo è l'endpoint ufficiale usato dai sistemi interni di suggerimento/ricerca di IMDb
-    url = f"https://sg.media-imdb.com/suggests/{id_input[0]}/{id_input}.json"
+if st.button("Avvia Estrazione Dettagliata"):
+    # Utilizziamo l'endpoint GraphQL interno di IMDb (quello usato dalle app moderne)
+    url = "https://api.graphql.imdb.com/"
     
-    with st.spinner("Connessione ai server nativi di IMDb..."):
+    # Costruiamo la richiesta esatta per chiedere a IMDb solo Titolo, Voto e Numero Voti di quel film
+    query_graphql = {
+        "query": """
+        query GetMovieRating($id: ID!) {
+          title(id: $id) {
+            originalTitleText {
+              text
+            }
+            ratingsSummary {
+              aggregateRating
+              voteCount
+            }
+          }
+        }
+        """,
+        "variables": {"id": id_input}
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    }
+    
+    with st.spinner("Interrogazione database centrale IMDb..."):
         try:
-            risposta = requests.get(url, timeout=15)
+            risposta = requests.post(url, json=query_graphql, headers=headers, timeout=15)
             
             st.subheader("1. Stato della Risposta")
             st.write(f"Codice HTTP: `{risposta.status_code}`")
             
             if risposta.status_code == 200:
-                # IMDb risponde con un formato chiamato JSONP (il JSON è avvolto in una funzione tipo imdb$tt30825738(...) )
-                # Dobbiamo pulire il testo per estrarre solo il JSON interno
-                testo_greggio = risposta.text
+                risposta_json = risposta.json()
+                data = risposta_json.get("data", {})
+                title_data = data.get("title") if data else None
                 
-                # Tagliamo l'involucro esterno della funzione per isolare le parentesi graffe {}
-                inizio_json = testo_greggio.find('{')
-                fine_json = testo_greggio.rfind('}') + 1
-                
-                if inizio_json != -1 and fine_json != -1:
-                    import json
-                    dati = json.loads(testo_greggio[inizio_json:fine_json])
+                if title_data:
+                    st.success("✅ Film trovato nei registri centrali!")
                     
-                    st.success("✅ Connessione riuscita e dati decodificati!")
+                    # Estrazione dei dati puliti
+                    titolo = title_data.get("originalTitleText", {}).get("text", "Titolo Sconosciuto")
+                    ratings = title_data.get("ratingsSummary", {})
                     
-                    # Vediamo cosa c'è dentro l'elenco dei risultati ('d')
-                    lista_risultati = dati.get("d", [])
+                    voto = ratings.get("aggregateRating", 0.0) if ratings else 0.0
+                    voti = ratings.get("voteCount", 0) if ratings else 0
                     
-                    if lista_risultati:
-                        film = lista_risultati[0]
-                        
-                        st.subheader("2. Dati Estratti:")
-                        st.write(f"🎥 **Titolo:** {film.get('l')}")
-                        st.write(f"📅 **Anno:** {film.get('y')}")
-                        st.write(f"👥 **Cast principale:** {film.get('s')}")
-                        
-                        st.subheader("3. Pacchetto dati completo ricevuto:")
-                        st.json(film)
-                    else:
-                        st.warning("Il server ha risposto ma l'ID non corrisponde a nessun film presente nei server di indicizzazione rapida.")
+                    st.subheader("2. Dati Reali Estratti:")
+                    st.write(f"🎥 **Titolo Originale:** {titolo}")
+                    st.write(f"⭐ **Voto IMDb:** {voto}")
+                    st.write(f"📊 **Numero di Voti:** {voti:,}".replace(",", "."))
+                    
+                    st.subheader("3. Risposta JSON nativa ricevuta:")
+                    st.json(risposta_json)
                 else:
-                    st.error("Impossibile isolare la struttura dati all'interno della risposta del server.")
+                    st.error("❌ Il server ha risposto ma non ha trovato questo ID film specifico.")
+                    st.json(risposta_json)
             else:
-                st.error(f"Il server di IMDb ha rifiutato la connessione. Risposta: {risposta.text}")
+                st.error(f"❌ Connessione rifiutata dal server GraphQL. Risposta: {risposta.text}")
                 
         except Exception as e:
-            st.error(f"💥 Errore durante l'esecuzione del codice: {e}")
-                
+            st.error(f"💥 Errore di esecuzione del codice: {e}")
+                                                                                  

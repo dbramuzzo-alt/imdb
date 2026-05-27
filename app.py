@@ -17,9 +17,8 @@ def carica_dati():
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# Funzione per estrarre i dati usando OMDb API (Super stabile, zero blocchi)
+# Funzione per estrarre i dati usando OMDb API
 def recupera_dati_omdb(id_imdb, api_key):
-    # OMDb vuole l'ID puro senza spazi
     url = f"http://www.omdbapi.com/?i={id_imdb}&apikey={api_key}"
     
     try:
@@ -32,18 +31,30 @@ def recupera_dati_omdb(id_imdb, api_key):
         if dati.get("Response") == "True":
             titolo = dati.get("Title", "Titolo Sconosciuto")
             
-            # Gestione del voto IMDb
-            voto_str = dati.get("imdbRating", "0.0")
-            voto = float(voto_str) if voto_str != "N/A" else 0.0
+            # Estrazione Voto IMDb (pulizia aggressiva)
+            voto_str = dati.get("imdbRating", "0.0").strip()
+            try:
+                voto = float(voto_str) if voto_str and voto_str != "N/A" else 0.0
+            except ValueError:
+                voto = 0.0
             
-            # Gestione del numero di voti (rimuovendo le virgole americane, es: "1,245,112" -> 1245112)
-            voti_str = dati.get("imdbVotes", "0").replace(",", "")
-            num_voti = int(voti_str) if voti_str != "N/A" else 0
+            # Estrazione Numero Voti (rimuove virgole, punti e spazi)
+            voti_str = dati.get("imdbVotes", "0").strip()
+            try:
+                if voti_str and voti_str != "N/A":
+                    voti_puliti = re.sub(r'[^\d]', '', voti_str)
+                    num_voti = int(voti_puliti) if voti_puliti else 0
+                else:
+                    num_voti = 0
+            except ValueError:
+                num_voti = 0
             
             return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
         else:
+            st.error(f"Errore API OMDb: {dati.get('Error', 'Errore sconosciuto')}")
             return None
     except Exception as e:
+        st.error(f"Errore di connessione: {e}")
         return None
 
 # Funzione per aggiornare la lista completa
@@ -72,7 +83,7 @@ def aggiorna_valutazioni(df, api_key):
 st.title("🎬 Il mio Tracker di Film IMDb")
 st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni senza blocchi!")
 
-# Configurazione API Key nella barra laterale o in alto
+# Configurazione API Key nella barra laterale
 st.sidebar.subheader("🔑 Configurazione")
 api_key = st.sidebar.text_input("Inserisci la tua OMDb API Key:", type="password")
 
@@ -82,7 +93,7 @@ if not api_key:
 
 df_film = carica_dati()
 
-# Aggiornamento automatico all'avvio (solo se l'API key è presente)
+# Aggiornamento automatico all'avvio
 if "aggiornato" not in st.session_state:
     if not df_film.empty:
         with st.spinner("Aggiornamento dati all'avvio..."):
@@ -99,25 +110,25 @@ if st.button("Aggiungi Film"):
         if match:
             id_estratto = match.group(1)
             
-            if id_estratto in df_film['id_imdb'].values:
-                st.info("Questo film è già presente nella tua lista!")
-            else:
-                with st.spinner("Recupero informazioni tramite API..."):
-                    dati_film = recupera_dati_omdb(id_estratto, api_key)
-                    if dati_film:
-                        nuovo_film = {
-                            "id_imdb": id_estratto,
-                            "Titolo": dati_film["Titolo"],
-                            "Valutazione IMDb": dati_film["Valutazione IMDb"],
-                            "Numero Voti": dati_film["Numero Voti"]
-                        }
-                        df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
-                        df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
-                        salva_dati(df_film)
-                        st.success(f"Aggiunto con successo: **{dati_film['Titolo']}**!")
-                        st.rerun()
-                    else:
-                        st.error("Impossibile trovare il film. Controlla che l'ID sia corretto e che l'API Key sia attiva.")
+            # Rimuoviamo il vecchio film se presente per forzare la sovrascrittura pulita
+            df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
+            
+            with st.spinner("Recupero informazioni tramite API..."):
+                dati_film = recupera_dati_omdb(id_estratto, api_key)
+                if dati_film:
+                    nuovo_film = {
+                        "id_imdb": id_estratto,
+                        "Titolo": dati_film["Titolo"],
+                        "Valutazione IMDb": dati_film["Valutazione IMDb"],
+                        "Numero Voti": dati_film["Numero Voti"]
+                    }
+                    df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
+                    df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
+                    salva_dati(df_film)
+                    st.success(f"Aggiunto: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
+                    st.rerun()
+                else:
+                    st.error("Impossibile recuperare i dettagli del film. L'ID potrebbe essere errato.")
         else:
             st.error("Non ho trovato un ID IMDb valido (es. tt0111161).")
     else:
@@ -133,8 +144,10 @@ if df_film.empty:
 else:
     tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
     
-    # Formatta il numero di voti inserendo i punti (es: 1.250.000)
-    tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    # Formattazione sicura del numero di voti
+    tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
+        lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
+    )
     
     st.dataframe(tabella_da_mostrare, use_container_width=True)
     

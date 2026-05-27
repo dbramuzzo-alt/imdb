@@ -4,6 +4,7 @@ import requests
 import json
 import os
 import re
+from datetime import datetime
 
 # --- CONFIGURAZIONE ---
 DB_FILE = "film_db.csv"
@@ -12,13 +13,14 @@ DB_FILE = "film_db.csv"
 def carica_dati():
     if os.path.exists(DB_FILE):
         return pd.read_csv(DB_FILE, dtype={'id_imdb': str})
-    return pd.DataFrame(columns=["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti"])
+    # Se il file non esiste, creiamo la struttura includendo la nuova colonna temporale
+    return pd.DataFrame(columns=["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"])
 
 # Salvataggio nel CSV locale
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# INFALLIBILE: Sfrutta le API GraphQL native di IMDb (Simula App Mobile)
+# Sfrutta le API GraphQL native di IMDb (Simula App Mobile)
 def recupera_voti_reali_imdb(id_imdb):
     url = "https://api.graphql.imdb.com/"
     
@@ -65,10 +67,14 @@ def recupera_voti_reali_imdb(id_imdb):
 
 # --- INTERFACCIA STREAMLIT ---
 st.title("🎬 Classifica Film - IMDb Tracker")
-st.write("Applicazione leggera collegata direttamente ai canali dati centrali di IMDb.")
+st.write("I film sono ordinati in base al numero di voti complessivi ricevuti su IMDb.")
 
 # Carichiamo i dati subito (velocissimo, legge solo il file locale)
 df_film = carica_dati()
+
+# Se nel vecchio database non esiste la colonna dei timestamp, la creiamo al volo compilando con stringhe vuote
+if "Ultimo Aggiornamento" not in df_film.columns:
+    df_film["Ultimo Aggiornamento"] = ""
 
 # --- SEZIONE AGGIUNTA FILM ---
 st.subheader("➕ Aggiungi un nuovo film")
@@ -86,14 +92,20 @@ if st.button("Aggiungi Film"):
             with st.spinner("Interrogazione database IMDb..."):
                 dati_film = recupera_voti_reali_imdb(id_estratto)
                 if dati_film:
+                    # Cattura il momento esatto in formato Giorno/Mese/Anno Ore:Minuti
+                    ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    
                     nuovo_film = {
                         "id_imdb": id_estratto,
                         "Titolo": dati_film["Titolo"],
                         "Valutazione IMDb": dati_film["Valutazione IMDb"],
-                        "Numero Voti": dati_film["Numero Voti"]
+                        "Numero Voti": dati_film["Numero Voti"],
+                        "Ultimo Aggiornamento": ora_attuale
                     }
                     df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
-                    df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
+                    
+                    # MODIFICA: Ordina la classifica per NUMERO VOTI (Decrescente)
+                    df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
                     salva_dati(df_film)
                     st.success(f"Aggiunto: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']} | Voti: {dati_film['Numero Voti']:,})")
                     st.rerun()
@@ -107,16 +119,19 @@ if st.button("Aggiungi Film"):
 st.divider()
 
 # --- CLASSIFICA PRINCIPALE ---
-st.subheader("📊 Classifica Generale")
+st.subheader("📊 Classifica Generale (Ordinata per Numero Voti)")
 
 if df_film.empty:
     st.info("La tua lista è vuota. Incolla un link qui sopra per iniziare!")
 else:
-    # Mostra la tabella formattata ed elegante, ordinata per voto decrescente
-    tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
+    # Mostra la tabella formattata, includendo la colonna dell'ultimo aggiornamento
+    tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"]].copy()
     tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
         lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
     )
+    # Riempie eventuali celle vuote con un valore di default testuale
+    tabella_da_mostrare["Ultimo Aggiornamento"] = tabella_da_mostrare["Ultimo Aggiornamento"].fillna("N/D")
+    
     st.dataframe(tabella_da_mostrare, use_container_width=True)
     
     st.divider()
@@ -128,29 +143,10 @@ else:
     for index, row in df_film.iterrows():
         col_titolo, col_update, col_delete = st.columns([3, 1, 1])
         
+        # Gestione elegante della stringa temporale per i vecchi dati
+        data_mostrata = row['Ultimo Aggiornamento'] if pd.notnull(row['Ultimo Aggiornamento']) and row['Ultimo Aggiornamento'] != "" else "N/D"
+        
         with col_titolo:
-            st.write(f"**{row['Titolo']}** (Voto: {row['Valutazione IMDb']} | Voti: {int(row['Numero Voti']):,})")
-            
-        with col_update:
-            if st.button("🔄 Aggiorna", key=f"up_{row['id_imdb']}"):
-                with st.spinner(f"Aggiornamento {row['Titolo']}..."):
-                    dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
-                    if dati_freschi:
-                        df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
-                        df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
-                        df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
-                        # Riordina la classifica dopo l'aggiornamento del voto
-                        df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
-                        salva_dati(df_film)
-                        st.success("Aggiornato!")
-                        st.rerun()
-                    else:
-                        st.error("Errore di connessione.")
-                        
-        with col_delete:
-            if st.button("❌ Elimina", key=f"del_{row['id_imdb']}"):
-                df_film = df_film.drop(index).reset_index(drop=True)
-                salva_dati(df_film)
-                st.warning("Film rimosso.")
-                st.rerun()
-                
+            st.write(f"**{row['Titolo']}**")
+            st.caption(f"Voto: {row['Valutazione IMDb']} | Voti: {int(row['Numero Voti']):,} | *Aggiornato il: {data_mostrata}*")
+    

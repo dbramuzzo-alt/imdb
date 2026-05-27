@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
-from imdb import Cinemagoer
+import requests
+from bs4 import BeautifulSoup
 import os
-
-# Inizializziamo Cinemagoer per connetterci a IMDb
-ia = Cinemagoer()
+import re
 
 # Nome del file dove salveremo i film
 DB_FILE = "film_db.csv"
@@ -19,31 +18,80 @@ def carica_dati():
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# Funzione per aggiornare i dati da IMDb
+# Funzione per estrarre i dati di un film da IMDb tramite Web Scraping
+def recupera_dati_imdb(id_imdb):
+    url = f"https://www.imdb.com/title/{id_imdb}/"
+    # IMDb richiede un User-Agent realistico per non bloccare la richiesta
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+    
+    risposta = requests.get(url, headers=headers)
+    if risposta.status_code != 200:
+        return None
+        
+    soup = BeautifulSoup(risposta.text, "html.parser")
+    
+    try:
+        # Estrai il titolo dal tag <title> o dagli open graph
+        titolo_tag = soup.find("meta", property="og:title")
+        if titolo_tag:
+            titolo = titolo_tag["content"].split(" (")[0] # Rimuove l'anno dal titolo (es. "Inception (2010)" -> "Inception")
+        else:
+            titolo = soup.find("title").text.replace(" - IMDb", "")
+            
+        # Trova il voto (cercando nello schema JSON strutturato o nei tag specifici di IMDb)
+        voto_tag = soup.find("span", {"class": "sc-bde20123-1 cCNeUe"}) # Classe standard attuale per il rating
+        if voto_tag:
+            voto = float(voto_tag.text)
+        else:
+            # Fallback se cambiano le classi
+            voto_meta = soup.find("meta", itemprop="ratingValue")
+            voto = float(voto_meta["content"]) if voto_meta else 0.0
+
+        # Trova il numero di voti
+        voti_count_tag = soup.find("div", {"class": "sc-bde20123-3 gZYLgH"}) # Classe standard attuale per il numero voti
+        if voti_count_tag:
+            testo_voti = voti_count_tag.text
+            # Converte formati come "1.2M" o "450K" in numeri interi approssimativi
+            moltiplicatore = 1
+            if "M" in testo_voti:
+                moltiplicatore = 1_000_000
+                testo_voti = testo_voti.replace("M", "")
+            elif "K" in testo_voti:
+                moltiplicatore = 1_000
+                testo_voti = testo_voti.replace("K", "")
+            
+            # Pulisce il testo lasciando solo numeri e punti/virgole decimali
+            testo_voti = re.sub(r'[^\d.]', '', testo_voti.replace(',', '.'))
+            num_voti = int(float(testo_voti) * moltiplicatore)
+        else:
+            num_voti = 0
+
+        return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
+    except Exception as e:
+        # Se fallisce il parsing avanzato, restituisce dati vuoti ma evita il crash
+        return None
+
+# Funzione per aggiornare la lista completa
 def aggiorna_valutazioni(df):
     if df.empty:
         return df
     
-    progress_text = "Aggiornamento valutazioni in corso..."
+    progress_text = "Aggiornamento valutazioni da IMDb..."
     barrita = st.progress(0, text=progress_text)
     
     for index, row in df.iterrows():
-        try:
-            # Recuperiamo il film usando il suo ID IMDb
-            movie = ia.get_movie(row['id_imdb'])
-            
-            # Aggiorniamo voto e numero di voti
-            df.at[index, 'Valutazione IMDb'] = movie.get('rating', 0.0)
-            df.at[index, 'Numero Voti'] = movie.get('votes', 0)
-            df.at[index, 'Titolo'] = movie.get('title', row['Titolo'])
-        except Exception as e:
-            st.warning(f"Impossibile aggiornare il film con ID {row['id_imdb']}: {e}")
+        dati_aggiornati = recupera_dati_imdb(row['id_imdb'])
+        if dati_aggiornati:
+            df.at[index, 'Valutazione IMDb'] = dati_aggiornati['Valutazione IMDb']
+            df.at[index, 'Numero Voti'] = dati_aggiornati['Numero Voti']
+            df.at[index, 'Titolo'] = dati_aggiornati['Titolo']
         
-        # Aggiorna la barra di progresso
         barrita.progress((index + 1) / len(df), text=progress_text)
     
     barrita.empty()
-    # Ordina i film per valutazione (dal più alto al più basso)
     df = df.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
     salva_dati(df)
     return df
@@ -52,53 +100,50 @@ def aggiorna_valutazioni(df):
 st.title("🎬 Il mio Tracker di Film IMDb")
 st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni in tempo reale!")
 
-# Carica il database all'avvio
 df_film = carica_dati()
 
-# Esegui l'aggiornamento automatico all'avvio se il database non è vuoto
+# Aggiornamento automatico all'avvio
 if "aggiornato" not in st.session_state:
     if not df_film.empty:
-        with st.spinner("Aggiornamento dati da IMDb all'avvio..."):
+        with st.spinner("Aggiornamento dati all'avvio..."):
             df_film = aggiorna_valutazioni(df_film)
     st.session_state["aggiornato"] = True
 
 # --- SEZIONE AGGIUNTA FILM ---
 st.subheader("➕ Aggiungi un nuovo film")
-link_imdb = st.text_input("Incolla il link del film su IMDb o direttamente l'ID (es. tt0111161):")
+link_imdb = st.text_input("Incolla il link del film (es. https://www.imdb.com/title/tt0111161/) o l'ID (tt0111161):")
 
 if st.button("Aggiungi Film"):
     if link_imdb:
-        # Estraiamo l'ID dal link (es. se inserisce https://www.imdb.com/title/tt0111161/ prende tt0111161)
-        id_estratto = "".join(filter(str.isdigit, link_imdb))
-        
-        if id_estratto:
+        # Estrae l'ID usando una regex per prendere la parte "tt" seguita da numeri
+        match = re.search(r'(tt\d+)', link_imdb)
+        if match:
+            id_estratto = match.group(1)
+            
             if id_estratto in df_film['id_imdb'].values:
                 st.info("Questo film è già presente nella tua lista!")
             else:
-                with st.spinner("Cercando il film su IMDb..."):
-                    try:
-                        movie = ia.get_movie(id_estratto)
+                with st.spinner("Recupero informazioni da IMDb..."):
+                    dati_film = recupera_dati_imdb(id_estratto)
+                    if dati_film:
                         nuovo_film = {
                             "id_imdb": id_estratto,
-                            "Titolo": movie.get('title', 'Sconosciuto'),
-                            "Valutazione IMDb": movie.get('rating', 0.0),
-                            "Numero Voti": movie.get('votes', 0)
+                            "Titolo": dati_film["Titolo"],
+                            "Valutazione IMDb": dati_film["Valutazione IMDb"],
+                            "Numero Voti": dati_film["Numero Voti"]
                         }
-                        # Aggiungiamo il film al DataFrame
                         df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
-                        # Riordiniamo subito
                         df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
                         salva_dati(df_film)
-                        st.success(f"Aggiunto con successo: **{movie.get('title')}**!")
+                        st.success(f"Aggiunto con successo: **{dati_film['Titolo']}**!")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore nel recupero del film. Controlla il link/ID. Dettaglio: {e}")
+                    else:
+                        st.error("Impossibile recuperare il film. Verifica che il link o l'ID siano corretti.")
         else:
-            st.error("Non sono riuscito a trovare un ID valido nel testo inserito.")
+            st.error("Non ho trovato un ID IMDb valido (deve contenere 'tt' seguito da numeri).")
     else:
         st.warning("Inserisci un link o un ID prima di premere il bottone.")
 
-# Linea di separazione visiva corretta in Streamlit
 st.divider()
 
 # --- VISUALIZZAZIONE DATI ---
@@ -107,18 +152,16 @@ st.subheader("📊 La tua classifica")
 if df_film.empty:
     st.info("La tua lista è vuota. Aggiungi il tuo primo film qui sopra!")
 else:
-    # Mostriamo una versione pulita della tabella
     tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
     
-    # Formattiamo il numero di voti per renderlo più leggibile
+    # Formatta il numero di voti inserendo i punti per i decimali (es: 1.250.000)
     tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(lambda x: f"{int(x):,}".replace(",", "."))
     
     st.dataframe(tabella_da_mostrare, use_container_width=True)
     
-    # Bottone per aggiornare manualmente
     if st.button("🔄 Forza Aggiornamento Ora"):
         with st.spinner("Aggiornamento in corso..."):
             df_film = aggiorna_valutazioni(df_film)
             st.success("Classifica aggiornata!")
             st.rerun()
-    
+                          

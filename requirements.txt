@@ -1,5 +1,1 @@
-streamlit
-pandas
-beautifulsoup4
-requests
-cinemagoer
+

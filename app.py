@@ -10,15 +10,17 @@ import json
 SCRAPER_API_KEY = "d09a651a095f55f0bd28f15a1bad8bd6"
 DB_FILE = "film_db.csv"
 
+# Funzione per caricare i dati dal CSV
 def carica_dati():
     if os.path.exists(DB_FILE):
         return pd.read_csv(DB_FILE, dtype={'id_imdb': str})
     return pd.DataFrame(columns=["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti"])
 
+# Funzione per salvare i dati nel CSV
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# ESTRAZIONE IBRIDA (JSON + HTML GRAFICO) TRAMITE PROXY
+# Funzione di estrazione basata sull'HTML reale di IMDb
 def recupera_voti_reali_imdb(id_imdb, scraper_api_key):
     url_bersaglio = f"https://www.imdb.com/title/{id_imdb}/"
     url_proxy = f"http://api.scraperapi.com?api_key={scraper_api_key}&url={url_bersaglio}"
@@ -28,102 +30,62 @@ def recupera_voti_reali_imdb(id_imdb, scraper_api_key):
         if risposta.status_code == 200:
             soup = BeautifulSoup(risposta.text, "html.parser")
             
-            # --- METODO 1: JSON-LD STRUTTURATO ---
-            script_tag = soup.find("script", type="application/ld+json")
-            if script_tag:
-                try:
-                    dati_json = json.loads(script_tag.string)
-                    titolo = dati_json.get("name")
-                    aggregate_rating = dati_json.get("aggregateRating", {})
-                    if aggregate_rating and titolo:
-                        voto = float(aggregate_rating.get("ratingValue", 0.0))
-                        num_voti = int(aggregate_rating.get("ratingCount", 0))
-                        return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
-                except:
-                    pass
-            
-            # --- METODO 2: FALLBACK HTML GRAFICO (Se il JSON fallisce o è parziale) ---
-            titolo_tag = soup.find("h1") or soup.find("meta", property="og:title")
             titolo = "Titolo Sconosciuto"
-            if titolo_tag:
-                titolo = titolo_tag.text.strip() if titolo_tag.name == "h1" else titolo_tag["content"].split(" (")[0]
-
-            # Cerca la casella del voto usando il testid ufficiale dell'interfaccia IMDb
-            voto_box = soup.find("div", {"data-testid": "hero-rating-bar__aggregate-rating__score"})
             voto = 0.0
-            if voto_box:
-                voto_testo = voto_box.find("span")
-                if voto_testo:
-                    try:
-                        voto = float(voto_testo.text.strip())
-                    except:
-                        pass
-            
-            # Cerca il numero dei voti nel testo adiacente
             num_voti = 0
-            voti_box = soup.find("div", string=re.compile(r'^[0-9.,]+[KM]?\s*(voti|votes)?', re.IGNORECASE))
-            if not voti_box and voto_box:
-                # Se non lo trova con le espressioni regolari, prende il tag successivo al voto
-                voti_box = voto_box.find_next_sibling("div")
-                
-            if voti_box:
-                testo_voti = voti_box.text.strip().upper()
-                moltiplicatore = 1
-                if "M" in testo_voti:
-                    moltiplicatore = 1_000_000
-                    testo_voti = testo_voti.replace("M", "")
-                elif "K" in testo_voti:
-                    moltiplicatore = 1_000
-                    testo_voti = testo_voti.replace("K", "")
-                
-                testo_voti = re.sub(r'[^\d.]', '', testo_voti.replace(',', '.'))
-                if testo_voti:
+            
+            # METODO 1: METADATI OPEN GRAPH
+            meta_title = soup.find("meta", property="og:title")
+            if meta_title and meta_title.get("content"):
+                content_testo = meta_title["content"]
+                if "⭐" in content_testo:
+                    parti = content_testo.split(" ⭐ ")
+                    titolo = parti[0].strip()
                     try:
-                        num_voti = int(float(testo_voti) * moltiplicatore)
+                        voto_estratto = parti[1].split("|")[0].strip()
+                        voto = float(voto_estratto)
                     except:
                         pass
+                else:
+                    titolo = content_testo.split(" (")[0].strip()
             
-            # Se abbiamo trovato almeno il titolo e un voto (o se è un film appena uscito senza voti strutturati)
+            # Estrazione Numero Voti (dal JSON-LD interno o dall'HTML)
             if titolo != "Titolo Sconosciuto":
-                return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
+                script_tag = soup.find("script", type="application/ld+json")
+                if script_tag:
+                    try:
+                        dati_json = json.loads(script_tag.string)
+                        aggregate_rating = dati_json.get("aggregateRating", {})
+                        if aggregate_rating:
+                            num_voti = int(aggregate_rating.get("ratingCount", 0))
+                    except:
+                        pass
                 
-    except Exception as e:
+                if num_voti == 0:
+                    voti_box = soup.find("div", string=re.compile(r'^[0-9.,]+[KM]?\s*(voti|votes)?', re.IGNORECASE))
+                    if voti_box:
+                        testo_voti = voti_box.text.strip().upper()
+                        moltiplicatore = 1
+                        if "M" in testo_voti: moltiplicatore = 1_000_000
+                        elif "K" in testo_voti: moltiplicatore = 1_000
+                        
+                        testo_voti = re.sub(r'[^\d.]', '', testo_voti.replace(',', '.'))
+                        try:
+                            num_voti = int(float(testo_voti) * moltiplicatore)
+                        except:
+                            pass
+                            
+                return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
+    except:
         pass
     return None
 
-# Funzione per aggiornare l'intera classifica
-def aggiorna_valutazioni(df, api_key):
-    if df.empty or not api_key:
-        return df
-    
-    progress_text = "Aggiornamento valutazioni reali da IMDb..."
-    barrita = st.progress(0, text=progress_text)
-    
-    for index, row in df.iterrows():
-        dati_aggiornati = recupera_voti_reali_imdb(row['id_imdb'], api_key)
-        if dati_aggiornati:
-            df.at[index, 'Valutazione IMDb'] = dati_aggiornati['Valutazione IMDb']
-            df.at[index, 'Numero Voti'] = dati_aggiornati['Numero Voti']
-            df.at[index, 'Titolo'] = dati_aggiornati['Titolo']
-        
-        barrita.progress((index + 1) / len(df), text=progress_text)
-    
-    barrita.empty()
-    df = df.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
-    salva_dati(df)
-    return df
-
 # --- INTERFACCIA STREAMLIT ---
-st.title("🎬 Tracker Ufficiale IMDb (Anti-Blocco)")
-st.write("Inserisci i tuoi film e ottieni le valutazioni reali estratte in tempo reale senza blocchi dei server.")
+st.title("🎬 Tracker Ufficiale IMDb")
+st.write("Aggiungi i tuoi film e gestisci gli aggiornamenti in modo manuale e mirato.")
 
+# Carichiamo i dati (L'aggiornamento automatico all'avvio è stato COMPLETAMENTE rimosso)
 df_film = carica_dati()
-
-if "aggiornato" not in st.session_state:
-    if not df_film.empty:
-        with st.spinner("Aggiornamento dati all'avvio..."):
-            df_film = aggiorna_valutazioni(df_film, SCRAPER_API_KEY)
-    st.session_state["aggiornato"] = True
 
 # --- SEZIONE AGGIUNTA FILM ---
 st.subheader("➕ Aggiungi un nuovo film")
@@ -135,9 +97,10 @@ if st.button("Aggiungi Film"):
         if match:
             id_estratto = match.group(1)
             
+            # Rimuoviamo eventuali vecchi record duplicati prima dell'inserimento
             df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
             
-            with st.spinner("Estrazione profonda tramite ScraperAPI..."):
+            with st.spinner("Estrazione dati da IMDb in corso..."):
                 dati_film = recupera_voti_reali_imdb(id_estratto, SCRAPER_API_KEY)
                 if dati_film:
                     nuovo_film = {
@@ -149,10 +112,10 @@ if st.button("Aggiungi Film"):
                     df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
                     df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
                     salva_dati(df_film)
-                    st.success(f"Aggiunto direttamente da IMDb: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
+                    st.success(f"Aggiunto: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
                     st.rerun()
                 else:
-                    st.error("Errore di estrazione. La pagina di IMDb non ha risposto correttamente o l'ID non è valido.")
+                    st.error("Errore di estrazione. Verifica l'ID o riprova tra un istante.")
         else:
             st.error("ID IMDb non valido.")
     else:
@@ -161,21 +124,52 @@ if st.button("Aggiungi Film"):
 st.divider()
 
 # --- VISUALIZZAZIONE DATI ---
-st.subheader("📊 Classifica Ufficiale IMDb")
+st.subheader("📊 Classifica Film")
 
 if df_film.empty:
     st.info("La tua lista è vuota. Aggiungi il tuo primo film qui sopra!")
 else:
+    # 1. Mostra la tabella ordinata delle valutazioni
     tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
     tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
         lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
     )
-    
     st.dataframe(tabella_da_mostrare, use_container_width=True)
     
-    if st.button("🔄 Forza Aggiornamento Ora"):
-        with st.spinner("Aggiornamento in corso..."):
-            df_film = aggiorna_valutazioni(df_film, SCRAPER_API_KEY)
-            st.success("Classifica aggiornata!")
-            st.rerun()
+    st.divider()
+    
+    # 2. Sezione Pannello di Controllo Singolo Film
+    st.subheader("⚙️ Azioni Veloci per Singolo Film")
+    st.write("Usa i pulsanti qui sotto per aggiornare i dati o eliminare un titolo specifico senza attendere il caricamento globale.")
+    
+    for index, row in df_film.iterrows():
+        # Creiamo 3 colonne visive: Titolo del film, Bottone Aggiorna, Bottone Elimina
+        col_titolo, col_update, col_delete = st.columns([3, 1, 1])
+        
+        with col_titolo:
+            st.write(f"**{row['Titolo']}** (Voto: {row['Valutazione IMDb']})")
             
+        with col_update:
+            # Generiamo una chiave unica per ogni bottone basata sull'ID IMDb
+            if st.button("🔄 Aggiorna", key=f"up_{row['id_imdb']}"):
+                with st.spinner(f"Aggiornamento {row['Titolo']}..."):
+                    dati_freschi = recupera_voti_reali_imdb(row['id_imdb'], SCRAPER_API_KEY)
+                    if dati_freschi:
+                        df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
+                        df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
+                        df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
+                        # Ordina nuovamente la lista globale dopo l'aggiornamento del singolo voto
+                        df_film = df_film.sort_values(by="Valutazione IMDb", ascending=False).reset_index(drop=True)
+                        salva_dati(df_film)
+                        st.success(f"Aggiornato!")
+                        st.rerun()
+                    else:
+                        st.error("Impossibile aggiornare questo titolo.")
+                        
+        with col_delete:
+            if st.button("❌ Elimina", key=f"del_{row['id_imdb']}"):
+                df_film = df_film.drop(index).reset_index(drop=True)
+                salva_dati(df_film)
+                st.warning("Film rimosso!")
+                st.rerun()
+                                   

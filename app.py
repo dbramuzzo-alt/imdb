@@ -56,7 +56,6 @@ st.write("Inserisci i tuoi film e tieni traccia delle loro valutazioni in tempo 
 df_film = carica_dati()
 
 # Esegui l'aggiornamento automatico all'avvio se il database non è vuoto
-# Usiamo lo stato della sessione per farlo solo una volta all'avvio
 if "aggiornato" not in st.session_state:
     if not df_film.empty:
         with st.spinner("Aggiornamento dati da IMDb all'avvio..."):
@@ -99,7 +98,8 @@ if st.button("Aggiungi Film"):
     else:
         st.warning("Inserisci un link o un ID prima di premere il bottone.")
 
----
+# Linea di separazione visiva corretta in Streamlit
+st.divider()
 
 # --- VISUALIZZAZIONE DATI ---
 st.subheader("📊 La tua classifica")
@@ -107,17 +107,18 @@ st.subheader("📊 La tua classifica")
 if df_film.empty:
     st.info("La tua lista è vuota. Aggiungi il tuo primo film qui sopra!")
 else:
-    # Mostriamo una versione pulita della tabella (senza la colonna ID interna)
+    # Mostriamo una versione pulita della tabella
     tabella_da_mostrare = df_film[["Titolo", "Valutazione IMDb", "Numero Voti"]].copy()
     
-    # Formattiamo il numero di voti per renderlo più leggibile (es. 1,500,200)
+    # Formattiamo il numero di voti per renderlo più leggibile
     tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(lambda x: f"{int(x):,}".replace(",", "."))
     
     st.dataframe(tabella_da_mostrare, use_container_width=True)
     
-    # Bottone per aggiornare manualmente in qualsiasi momento
+    # Bottone per aggiornare manualmente
     if st.button("🔄 Forza Aggiornamento Ora"):
         with st.spinner("Aggiornamento in corso..."):
             df_film = aggiorna_valutazioni(df_film)
             st.success("Classifica aggiornata!")
             st.rerun()
+    

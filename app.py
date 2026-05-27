@@ -5,19 +5,30 @@ import json
 import os
 import re
 from datetime import datetime
+import urllib.parse
 
-# --- CONFIGURAZIONE ---
+# --- CONFIGURAZIONE DATABASE ---
 DB_FILE = "film_db.csv"
+DB_FUTURI_FILE = "film_futuri_db.csv"
 
-# Caricamento sicuro del CSV locale (istantaneo all'avvio)
+# Caricamento sicuro del CSV dei film con ID
 def carica_dati():
     if os.path.exists(DB_FILE):
         return pd.read_csv(DB_FILE, dtype={'id_imdb': str})
     return pd.DataFrame(columns=["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"])
 
-# Salvataggio nel CSV locale
+# Caricamento sicuro del CSV dei film futuri (senza ID)
+def carica_dati_futuri():
+    if os.path.exists(DB_FUTURI_FILE):
+        return pd.read_csv(DB_FUTURI_FILE, dtype=str)
+    return pd.DataFrame(columns=["Titolo", "Anno Presunto", "Note"])
+
+# Salvataggio nei CSV locali
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
+
+def salva_dati_futuri(df):
+    df.to_csv(DB_FUTURI_FILE, index=False)
 
 # Sfrutta le API GraphQL native di IMDb (Simula App Mobile)
 def recupera_voti_reali_imdb(id_imdb):
@@ -66,138 +77,189 @@ def recupera_voti_reali_imdb(id_imdb):
 
 # --- INTERFACCIA STREAMLIT ---
 st.title("🎬 Classifica Film - IMDb Tracker")
-st.write("I film sono ordinati in base al numero di voti complessivi ricevuti su IMDb.")
 
-# Carichiamo i dati subito (velocissimo, legge solo il file locale)
+# Carichiamo i due database locali
 df_film = carica_dati()
+df_futuri = carica_dati_futuri()
 
-# Gestione colonna timestamp per vecchi database
 if "Ultimo Aggiornamento" not in df_film.columns:
     df_film["Ultimo Aggiornamento"] = ""
 
-# --- SEZIONE AGGIUNTA FILM ---
-st.subheader("➕ Aggiungi un nuovo film")
-link_imdb = st.text_input("Incolla il link o l'ID completo da IMDb (es. tt30825738):")
+# --- CREAZIONE DELLE SCHEDE (TABS) ---
+# Separata la gestione principale dai promemoria futuri per non affollare la schermata
+tab1, tab2 = st.tabs(["📊 Classifica Film (Con ID)", "📌 Promemoria Film Futuri (Senza ID)"])
 
-# Creiamo due pulsanti vicini: uno per aggiungere, uno per aggiornare tutto
-col_btn1, col_btn2 = st.columns([1, 1])
+# ==========================================
+# SCHEDA 1: CLASSIFICA FILM ESISTENTI
+# ==========================================
+with tab1:
+    st.subheader("➕ Aggiungi un film esistente")
+    link_imdb = st.text_input("Incolla il link o l'ID completo da IMDb (es. tt30825738):", key="add_exist")
 
-with col_btn1:
-    if st.button("Aggiungi Film", use_container_width=True):
-        if link_imdb:
-            match = re.search(r'(tt\d+)', link_imdb)
-            if match:
-                id_estratto = match.group(1)
-                df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
-                
-                with st.spinner("Interrogazione database IMDb..."):
-                    dati_film = recupera_voti_reali_imdb(id_estratto)
-                    if dati_film:
-                        ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
-                        nuovo_film = {
-                            "id_imdb": id_estratto,
-                            "Titolo": dati_film["Titolo"],
-                            "Valutazione IMDb": dati_film["Valutazione IMDb"],
-                            "Numero Voti": dati_film["Numero Voti"],
-                            "Ultimo Aggiornamento": ora_attuale
-                        }
-                        df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
-                        df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
-                        salva_dati(df_film)
-                        st.success(f"Aggiunto: **{dati_film['Titolo']}**")
-                        st.rerun()
-                    else:
-                        st.error("Impossibile recuperare i dati. Verifica l'ID o riprova.")
-            else:
-                st.error("Formato ID IMDb non valido (es. tt30825738).")
-        else:
-            st.warning("Inserisci un link prima di premere il pulsante.")
+    col_btn1, col_btn2 = st.columns([1, 1])
 
-with col_btn2:
-    if st.button("🔄 Aggiorna Tutta la Classifica", use_container_width=True):
-        if df_film.empty:
-            st.warning("La lista è vuota, non c'è nulla da aggiornare!")
-        else:
-            progress_bar = st.progress(0)
-            totale_film = len(df_film)
-            
-            with st.spinner("Aggiornamento globale di tutti i codici in corso..."):
-                for index, row in df_film.iterrows():
-                    dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
-                    if dati_freschi:
-                        ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
-                        df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
-                        df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
-                        df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
-                        df_film.at[index, 'Ultimo Aggiornamento'] = ora_attuale
+    with col_btn1:
+        if st.button("Aggiungi Film", use_container_width=True):
+            if link_imdb:
+                match = re.search(r'(tt\d+)', link_imdb)
+                if match:
+                    id_estratto = match.group(1)
+                    df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
                     
-                    # Aggiorna la barra di caricamento visiva
-                    progress_bar.progress((index + 1) / totale_film)
+                    with st.spinner("Interrogazione database IMDb..."):
+                        dati_film = recupera_voti_reali_imdb(id_estratto)
+                        if dati_film:
+                            ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
+                            nuovo_film = {
+                                "id_imdb": id_estratto,
+                                "Titolo": dati_film["Titolo"],
+                                "Valutazione IMDb": dati_film["Valutazione IMDb"],
+                                "Numero Voti": dati_film["Numero Voti"],
+                                "Ultimo Aggiornamento": ora_attuale
+                            }
+                            df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
+                            df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
+                            salva_dati(df_film)
+                            st.success(f"Aggiunto: **{dati_film['Titolo']}**")
+                            st.rerun()
+                        else:
+                            st.error("Impossibile recuperare i dati. Verifica l'ID o riprova.")
+                else:
+                    st.error("Formato ID IMDb non valido (es. tt30825738).")
+            else:
+                st.warning("Inserisci un link prima di premere il pulsante.")
+
+    with col_btn2:
+        if st.button("🔄 Aggiorna Tutta la Classifica", use_container_width=True):
+            if df_film.empty:
+                st.warning("La lista è vuota, non c'è nulla da aggiornare!")
+            else:
+                progress_bar = st.progress(0)
+                totale_film = len(df_film)
                 
-                # Riordina per numero di voti alla fine dell'intero ciclo
-                df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
-                salva_dati(df_film)
-                st.success("Tutti i film sono stati aggiornati con successo!")
-                st.rerun()
+                with st.spinner("Aggiornamento globale in corso..."):
+                    for index, row in df_film.iterrows():
+                        dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
+                        if dati_freschi:
+                            ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
+                            df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
+                            df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
+                            df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
+                            df_film.at[index, 'Ultimo Aggiornamento'] = ora_attuale
+                        progress_bar.progress((index + 1) / totale_film)
+                    
+                    df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
+                    salva_dati(df_film)
+                    st.success("Tutti i film sono stati aggiornati con successo!")
+                    st.rerun()
 
-st.divider()
-
-# --- CLASSIFICA PRINCIPALE ---
-st.subheader("📊 Classifica Generale (Ordinata per Numero Voti)")
-
-if df_film.empty:
-    st.info("La tua lista è vuota. Incolla un link qui sopra per iniziare!")
-else:
-    # MODIFICA: Ora mostriamo anche la colonna "id_imdb" rinominandola in "ID IMDb"
-    tabella_da_mostrare = df_film[["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"]].copy()
-    tabella_da_mostrare.columns = ["ID IMDb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"]
-    
-    # Formattazione estetica del numero dei voti (es. 35.353)
-    tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
-        lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
-    )
-    tabella_da_mostrare["Ultimo Aggiornamento"] = tabella_da_mostrare["Ultimo Aggiornamento"].fillna("N/D")
-    
-    st.dataframe(tabella_da_mostrare, use_container_width=True)
-    
     st.divider()
-    
-    # --- PANNELLO DI GESTIONE CHIRURGICA ---
-    st.subheader("⚙️ Gestione e Aggiornamenti Manuali")
-    st.write("Controlla o elimina i titoli singolarmente tramite il loro codice identificativo:")
-    
-    for index, row in df_film.iterrows():
-        col_titolo, col_update, col_delete = st.columns([3, 1, 1])
+
+    st.subheader("📊 Classifica Generale (Ordinata per Numero Voti)")
+    if df_film.empty:
+        st.info("La tua lista è vuota. Incolla un link qui sopra per iniziare!")
+    else:
+        tabella_da_mostrare = df_film[["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"]].copy()
+        tabella_da_mostrare.columns = ["ID IMDb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"]
+        tabella_da_mostrare["Numero Voti"] = tabella_da_mostrare["Numero Voti"].map(
+            lambda x: f"{int(x):,}".replace(",", ".") if pd.notnull(x) else "0"
+        )
+        tabella_da_mostrare["Ultimo Aggiornamento"] = tabella_da_mostrare["Ultimo Aggiornamento"].fillna("N/D")
+        st.dataframe(tabella_da_mostrare, use_container_width=True)
         
-        data_mostrata = row['Ultimo Aggiornamento'] if pd.notnull(row['Ultimo Aggiornamento']) and row['Ultimo Aggiornamento'] != "" else "N/D"
+        st.divider()
+        st.subheader("⚙️ Gestione e Aggiornamenti Manuali")
         
-        with col_titolo:
-            # L'ID viene mostrato chiaramente anche nel pannello delle azioni singole
-            st.write(f"**{row['Titolo']}** `({row['id_imdb']})`")
-            st.caption(f"Voto: {row['Valutazione IMDb']} | Voti: {int(row['Numero Voti']):,} | *Aggiornato: {data_mostrata}*")
+        for index, row in df_film.iterrows():
+            col_titolo, col_update, col_delete = st.columns([3, 1, 1])
+            data_mostrata = row['Ultimo Aggiornamento'] if pd.notnull(row['Ultimo Aggiornamento']) and row['Ultimo Aggiornamento'] != "" else "N/D"
             
-        with col_update:
-            if st.button("🔄 Aggiorna", key=f"up_{row['id_imdb']}"):
-                with st.spinner(f"Aggiornamento {row['id_imdb']}..."):
-                    dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
-                    if dati_freschi:
-                        ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
-                        df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
-                        df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
-                        df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
-                        df_film.at[index, 'Ultimo Aggiornamento'] = ora_attuale
-                        
-                        df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
-                        salva_dati(df_film)
-                        st.success("Fatto!")
-                        st.rerun()
-                    else:
-                        st.error("Errore di connessione.")
-                        
-        with col_delete:
-            if st.button("❌ Elimina", key=f"del_{row['id_imdb']}"):
-                df_film = df_film.drop(index).reset_index(drop=True)
-                salva_dati(df_film)
-                st.warning("Film rimosso.")
+            with col_titolo:
+                st.write(f"**{row['Titolo']}** `({row['id_imdb']})`")
+                st.caption(f"Voto: {row['Valutazione IMDb']} | Voti: {int(row['Numero Voti']):,} | *Aggiornato: {data_mostrata}*")
+                
+            with col_update:
+                if st.button("🔄 Aggiorna", key=f"up_{row['id_imdb']}"):
+                    with st.spinner(f"Aggiornamento {row['id_imdb']}..."):
+                        dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
+                        if dati_freschi:
+                            ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
+                            df_film.at[index, 'Valutazione IMDb'] = dati_freschi['Valutazione IMDb']
+                            df_film.at[index, 'Numero Voti'] = dati_freschi['Numero Voti']
+                            df_film.at[index, 'Titolo'] = dati_freschi['Titolo']
+                            df_film.at[index, 'Ultimo Aggiornamento'] = ora_attuale
+                            df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
+                            salva_dati(df_film)
+                            st.success("Fatto!")
+                            st.rerun()
+                        else:
+                            st.error("Errore di connessione.")
+                            
+            with col_delete:
+                if st.button("❌ Elimina", key=f"del_{row['id_imdb']}"):
+                    df_film = df_film.drop(index).reset_index(drop=True)
+                    salva_dati(df_film)
+                    st.warning("Film rimosso.")
+                    st.rerun()
+
+# ==========================================
+# SCHEDA 2: SEZIONE PROMEMORIA FILM FUTURI
+# ==========================================
+with tab2:
+    st.subheader("📌 Promemoria Nuovi Film (Senza ancora una scheda IMDb)")
+    st.write("Usa questa sezione per annotare i film appena annunciati che vuoi tenere d'occhio.")
+    
+    # Form d'inserimento manuale
+    with st.form("form_film_futuro", clear_on_submit=True):
+        f_titolo = st.text_input("Titolo del Film:")
+        f_anno = st.text_input("Anno di uscita presunto (es. 2027 o 2028):")
+        f_note = st.text_area("Note / Perchè ti interessa (es. Regista, Attori, Rumors):")
+        submit_futuro = st.form_submit_button("Salva nei Promemoria")
+        
+        if submit_futuro:
+            if f_titolo:
+                nuovo_futuro = {
+                    "Titolo": f_titolo.strip(),
+                    "Anno Presunto": f_anno.strip() if f_anno else "TBD",
+                    "Note": f_note.strip() if f_note else "-"
+                }
+                df_futuri = pd.concat([df_futuri, pd.DataFrame([nuovo_futuro])], ignore_index=True)
+                salva_dati_futuri(df_futuri)
+                st.success(f"Promemoria salvato per: **{f_titolo}**")
                 st.rerun()
-                        
+            else:
+                st.error("Il titolo del film è obbligatorio per salvare il promemoria.")
+
+    st.divider()
+    st.subheader("📋 Lista dei Promemoria Salvati")
+    
+    if df_futuri.empty:
+        st.info("Nessun promemoria salvato al momento.")
+    else:
+        # Mostra la tabella dei film senza ID
+        st.dataframe(df_futuri, use_container_width=True)
+        st.divider()
+        
+        # Genera i controlli di ricerca e rimozione per ogni riga dei film futuri
+        for index, row in df_futuri.iterrows():
+            col_info, col_search, col_del_futuro = st.columns([3, 1, 1])
+            
+            with col_info:
+                st.write(f"📌 **{row['Titolo']}** ({row['Anno Presunto']})")
+                st.caption(f"Note: {row['Note']}")
+                
+            with col_search:
+                # Codifica il titolo per renderlo un link web sicuro (es. spazi -> %20)
+                query_string = urllib.parse.quote(row['Titolo'])
+                url_ricerca_imdb = f"https://www.imdb.com/find/?q={query_string}"
+                
+                # Un semplice link formattato a pulsante che punta direttamente alla pagina di ricerca IMDb
+                st.link_button("🔍 Cerca su IMDb", url_ricerca_imdb, use_container_width=True)
+                
+            with col_del_futuro:
+                if st.button("❌ Elimina", key=f"del_futuro_{index}", use_container_width=True):
+                    df_futuri = df_futuri.drop(index).reset_index(drop=True)
+                    salva_dati_futuri(df_futuri)
+                    st.warning("Promemoria eliminato.")
+                    st.rerun()
+                            

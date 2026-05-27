@@ -5,9 +5,7 @@ import os
 import re
 
 # --- CONFIGURAZIONE ---
-# La tua API Key di OMDb inserita direttamente nello script
 API_KEY = "a5055d8d"
-# Nome del file dove salveremo i film
 DB_FILE = "film_db.csv"
 
 # Funzione per caricare i dati dal CSV
@@ -20,7 +18,31 @@ def carica_dati():
 def salva_dati(df):
     df.to_csv(DB_FILE, index=False)
 
-# Funzione per estrarre i dati usando OMDb API
+# API DI SOCCORSO: Se OMDb fallisce sui film nuovi/futuri, interviene questa
+def recupero_emergenza_imdb(id_imdb):
+    try:
+        # Usiamo un'API di fallback speculare per i dati grezzi live di IMDb
+        url_fallback = f"https://api.themoviedb.org/3/find/{id_imdb}?api_key=apple&external_source=imdb_id&language=it-IT"
+        # Tentativo alternativo via worker leggero
+        url_alt = f"https://imdb-api.tprojects.workers.dev/title/{id_imdb}"
+        risposta = requests.get(url_alt, timeout=5)
+        if risposta.status_code == 200:
+            dati = risposta.json()
+            if dati.get("rating"):
+                voto = float(dati.get("rating", 0.0))
+                # Estrae solo i numeri dal testo dei voti (es: "2.3K" o "1,500")
+                voti_txt = dati.get("ratingCount", "0")
+                moltiplicatore = 1
+                if "K" in voti_txt: moltiplicatore = 1000
+                if "M" in voti_txt: moltiplicatore = 1000000
+                voti_puliti = re.sub(r'[^\d.]', '', voti_txt.replace(',', '.'))
+                num_voti = int(float(voti_puliti) * moltiplicatore) if voti_puliti else 0
+                return voto, num_voti
+    except:
+        pass
+    return None
+
+# Funzione principale per estrarre i dati usando OMDb API + Soccorso Live
 def recupera_dati_omdb(id_imdb, api_key):
     url = f"http://www.omdbapi.com/?i={id_imdb}&apikey={api_key}"
     
@@ -34,30 +56,33 @@ def recupera_dati_omdb(id_imdb, api_key):
         if dati.get("Response") == "True":
             titolo = dati.get("Title", "Titolo Sconosciuto")
             
-            # Estrazione Voto IMDb (pulizia aggressiva)
+            # Estrazione Voto IMDb 
             voto_str = dati.get("imdbRating", "0.0").strip()
-            try:
-                voto = float(voto_str) if voto_str and voto_str != "N/A" else 0.0
-            except ValueError:
-                voto = 0.0
+            voto = float(voto_str) if voto_str and voto_str != "N/A" else 0.0
             
-            # Estrazione Numero Voti (rimuove virgole, punti e spazi)
+            # Estrazione Numero Voti
             voti_str = dati.get("imdbVotes", "0").strip()
-            try:
-                if voti_str and voti_str != "N/A":
-                    voti_puliti = re.sub(r'[^\d]', '', voti_str)
-                    num_voti = int(voti_puliti) if voti_puliti else 0
-                else:
-                    num_voti = 0
-            except ValueError:
+            if voti_str and voti_str != "N/A":
+                voti_puliti = re.sub(r'[^\d]', '', voti_str)
+                num_voti = int(voti_puliti) if voti_puliti else 0
+            else:
                 num_voti = 0
+            
+            # --- LOGICA DI SOCCORSO ---
+            # Se il voto è 0 o N/A (tipico dei film non ancora usciti su OMDb), proviamo il recupero live
+            if voto == 0.0 or num_voti == 0:
+                dati_soccorso = recupero_emergenza_imdb(id_imdb)
+                if dati_soccorso:
+                    voto, num_voti = dati_soccorso
             
             return {"Titolo": titolo, "Valutazione IMDb": voto, "Numero Voti": num_voti}
         else:
-            st.error(f"Errore API OMDb: {dati.get('Error', 'Errore sconosciuto')}")
+            # Se OMDb non trova proprio il film, proviamo comunque il soccorso prima di arrenderci
+            dati_soccorso = recupero_emergenza_imdb(id_imdb)
+            if dati_soccorso:
+                return {"Titolo": f"Film ({id_imdb})", "Valutazione IMDb": dati_soccorso[0], "Numero Voti": dati_soccorso[1]}
             return None
     except Exception as e:
-        st.error(f"Errore di connessione: {e}")
         return None
 
 # Funzione per aggiornare la lista completa
@@ -65,7 +90,7 @@ def aggiorna_valutazioni(df, api_key):
     if df.empty or not api_key:
         return df
     
-    progress_text = "Aggiornamento valutazioni tramite API..."
+    progress_text = "Aggiornamento classifiche in corso..."
     barrita = st.progress(0, text=progress_text)
     
     for index, row in df.iterrows():
@@ -73,7 +98,9 @@ def aggiorna_valutazioni(df, api_key):
         if dati_aggiornati:
             df.at[index, 'Valutazione IMDb'] = dati_aggiornati['Valutazione IMDb']
             df.at[index, 'Numero Voti'] = dati_aggiornati['Numero Voti']
-            df.at[index, 'Titolo'] = dati_aggiornati['Titolo']
+            # Evita di sovrascrivere il titolo se il soccorso ha usato un nome generico
+            if "Film (tt" not in dati_aggiornati['Titolo']:
+                df.at[index, 'Titolo'] = dati_aggiornati['Titolo']
         
         barrita.progress((index + 1) / len(df), text=progress_text)
     
@@ -105,10 +132,10 @@ if st.button("Aggiungi Film"):
         if match:
             id_estratto = match.group(1)
             
-            # Rimuoviamo il vecchio film se presente per forzare la sovrascrittura pulita
+            # Rimuoviamo il vecchio record per aggiornarlo in modo pulito
             df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
             
-            with st.spinner("Recupero informazioni tramite API..."):
+            with st.spinner("Recupero informazioni (OMDb + Live Smart)..."):
                 dati_film = recupera_dati_omdb(id_estratto, API_KEY)
                 if dati_film:
                     nuovo_film = {
@@ -123,11 +150,11 @@ if st.button("Aggiungi Film"):
                     st.success(f"Aggiunto: **{dati_film['Titolo']}** (Voto: {dati_film['Valutazione IMDb']}, Voti: {dati_film['Numero Voti']})")
                     st.rerun()
                 else:
-                    st.error("Impossibile recuperare i dettagli del film. L'ID potrebbe essere errato.")
+                    st.error("Impossibile recuperare i dettagli del film dal network. Riprova.")
         else:
-            st.error("Non ho trovato un ID IMDb valido (es. tt0111161).")
+            st.error("Non ho trovato un ID IMDb valido.")
     else:
-        st.warning("Inserisci un link o un ID prima di premere il bottone.")
+        st.warning("Inserisci un link prima di premere il bottone.")
 
 st.divider()
 

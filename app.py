@@ -6,31 +6,84 @@ import os
 import re
 from datetime import datetime
 import urllib.parse
+from github import Github, GithubException
+import io
 
-# --- CONFIGURAZIONE DATABASE ---
+# --- CONFIGURAZIONE GITHUB ---
+# ⚠️ SOSTITUISCI CON IL TUO USERNAME E NOME REPOSITORY (es. "mario-rossi/imdb-tracker")
+REPO_NAME = "dbramuzzo-alt/imdb" 
 DB_FILE = "film_db.csv"
 DB_FUTURI_FILE = "film_futuri_db.csv"
 
-# Caricamento sicuro del CSV dei film con ID
+# Recupero del Token dai Secrets di Streamlit
+if "GITHUB_TOKEN" not in st.secrets:
+    st.error("Errore: GITHUB_TOKEN non trovato nei Secrets di Streamlit!")
+    st.stop()
+
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+
+# Inizializzazione client GitHub
+try:
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(REPO_NAME)
+except Exception as e:
+    st.error(f"Impossibile connettersi a GitHub. Verifica il Token e il nome del repository. Errore: {e}")
+    st.stop()
+
+# --- FUNZIONI DI CARICAMENTO E SALVATAGGIO DA GITHUB ---
+def carica_da_github(file_path, colonne_default, dtypes=None):
+    try:
+        file_content = repo.get_contents(file_path)
+        csv_data = file_content.decoded_content.decode('utf-8')
+        return pd.read_csv(io.StringIO(csv_data), dtype=dtypes)
+    except GithubException as e:
+        if e.status == 404:
+            # Se il file non esiste sul repository, ritorna un dataframe vuoto con le colonne corrette
+            return pd.DataFrame(columns=colonne_default)
+        else:
+            st.error(f"Errore GitHub nel caricamento di {file_path}: {e}")
+            return pd.DataFrame(columns=colonne_default)
+
+def salva_su_github(df, file_path, commit_message):
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    content_to_upload = csv_buffer.getvalue()
+    
+    try:
+        # Cerca il file per ottenere il suo SHA (necessario per sovrascriverlo)
+        file_contents = repo.get_contents(file_path)
+        repo.update_file(
+            path=file_path,
+            message=commit_message,
+            content=content_to_upload,
+            sha=file_contents.sha
+        )
+    except GithubException as e:
+        if e.status == 404:
+            # Se il file non esiste ancora su GitHub, lo crea
+            repo.create_file(
+                path=file_path,
+                message=commit_message,
+                content=content_to_upload
+            )
+        else:
+            st.error(f"Errore GitHub nel salvataggio di {file_path}: {e}")
+
+# Interfacce per il vecchio schema di funzioni dello script
 def carica_dati():
-    if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE, dtype={'id_imdb': str})
-    return pd.DataFrame(columns=["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"])
+    return carica_da_github(DB_FILE, ["id_imdb", "Titolo", "Valutazione IMDb", "Numero Voti", "Ultimo Aggiornamento"], {'id_imdb': str})
 
-# Caricamento sicuro del CSV dei film futuri (senza ID)
 def carica_dati_futuri():
-    if os.path.exists(DB_FUTURI_FILE):
-        return pd.read_csv(DB_FUTURI_FILE, dtype=str)
-    return pd.DataFrame(columns=["Titolo", "Anno Presunto", "Note"])
+    return carica_da_github(DB_FUTURI_FILE, ["Titolo", "Anno Presunto", "Note"], str)
 
-# Salvataggio nei CSV locali
 def salva_dati(df):
-    df.to_csv(DB_FILE, index=False)
+    salva_su_github(df, DB_FILE, "Aggiornato database film esistenti [Streamlit]")
 
 def salva_dati_futuri(df):
-    df.to_csv(DB_FUTURI_FILE, index=False)
+    salva_su_github(df, DB_FUTURI_FILE, "Aggiornato database film futuri [Streamlit]")
 
-# Sfrutta le API GraphQL native di IMDb (Simula App Mobile)
+
+# --- RECUPERO DATI IMDB (GRAPHQL) ---
 def recupera_voti_reali_imdb(id_imdb):
     url = "https://api.graphql.imdb.com/"
     
@@ -75,10 +128,11 @@ def recupera_voti_reali_imdb(id_imdb):
         pass
     return None
 
-# --- INTERFACCIA STREAMLIT ---
-st.title("🎬 Classifica Film - IMDb Tracker")
 
-# Carichiamo i due database locali
+# --- INTERFACCIA STREAMLIT ---
+st.title("🎬 Classifica Film - IMDb Tracker (GitHub Cloud)")
+
+# Caricamento dinamico dei database da GitHub
 df_film = carica_dati()
 df_futuri = carica_dati_futuri()
 
@@ -86,7 +140,6 @@ if "Ultimo Aggiornamento" not in df_film.columns:
     df_film["Ultimo Aggiornamento"] = ""
 
 # --- CREAZIONE DELLE SCHEDE (TABS) ---
-# Separata la gestione principale dai promemoria futuri per non affollare la schermata
 tab1, tab2 = st.tabs(["📊 Classifica Film (Con ID)", "📌 Promemoria Film Futuri (Senza ID)"])
 
 # ==========================================
@@ -106,7 +159,7 @@ with tab1:
                     id_estratto = match.group(1)
                     df_film = df_film[df_film['id_imdb'] != id_estratto].reset_index(drop=True)
                     
-                    with st.spinner("Interrogazione database IMDb..."):
+                    with st.spinner("Interrogazione database IMDb e sincronizzazione GitHub..."):
                         dati_film = recupera_voti_reali_imdb(id_estratto)
                         if dati_film:
                             ora_attuale = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -120,7 +173,7 @@ with tab1:
                             df_film = pd.concat([df_film, pd.DataFrame([nuovo_film])], ignore_index=True)
                             df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
                             salva_dati(df_film)
-                            st.success(f"Aggiunto: **{dati_film['Titolo']}**")
+                            st.success(f"Aggiunto e salvato su GitHub: **{dati_film['Titolo']}**")
                             st.rerun()
                         else:
                             st.error("Impossibile recuperare i dati. Verifica l'ID o riprova.")
@@ -137,7 +190,7 @@ with tab1:
                 progress_bar = st.progress(0)
                 totale_film = len(df_film)
                 
-                with st.spinner("Aggiornamento globale in corso..."):
+                with st.spinner("Aggiornamento globale e push su GitHub in corso..."):
                     for index, row in df_film.iterrows():
                         dati_freschi = recupera_voti_reali_imdb(row['id_imdb'])
                         if dati_freschi:
@@ -150,7 +203,7 @@ with tab1:
                     
                     df_film = df_film.sort_values(by="Numero Voti", ascending=False).reset_index(drop=True)
                     salva_dati(df_film)
-                    st.success("Tutti i film sono stati aggiornati con successo!")
+                    st.success("Tutti i film sono stati aggiornati e salvati su GitHub!")
                     st.rerun()
 
     st.divider()
@@ -199,7 +252,7 @@ with tab1:
                 if st.button("❌ Elimina", key=f"del_{row['id_imdb']}"):
                     df_film = df_film.drop(index).reset_index(drop=True)
                     salva_dati(df_film)
-                    st.warning("Film rimosso.")
+                    st.warning("Film rimosso da GitHub.")
                     st.rerun()
 
 # ==========================================
@@ -209,7 +262,6 @@ with tab2:
     st.subheader("📌 Promemoria Nuovi Film (Senza ancora una scheda IMDb)")
     st.write("Usa questa sezione per annotare i film appena annunciati che vuoi tenere d'occhio.")
     
-    # Form d'inserimento manuale
     with st.form("form_film_futuro", clear_on_submit=True):
         f_titolo = st.text_input("Titolo del Film:")
         f_anno = st.text_input("Anno di uscita presunto (es. 2027 o 2028):")
@@ -225,7 +277,7 @@ with tab2:
                 }
                 df_futuri = pd.concat([df_futuri, pd.DataFrame([nuovo_futuro])], ignore_index=True)
                 salva_dati_futuri(df_futuri)
-                st.success(f"Promemoria salvato per: **{f_titolo}**")
+                st.success(f"Promemoria salvato su GitHub per: **{f_titolo}**")
                 st.rerun()
             else:
                 st.error("Il titolo del film è obbligatorio per salvare il promemoria.")
@@ -236,11 +288,9 @@ with tab2:
     if df_futuri.empty:
         st.info("Nessun promemoria salvato al momento.")
     else:
-        # Mostra la tabella dei film senza ID
         st.dataframe(df_futuri, use_container_width=True)
         st.divider()
         
-        # Genera i controlli di ricerca e rimozione per ogni riga dei film futuri
         for index, row in df_futuri.iterrows():
             col_info, col_search, col_del_futuro = st.columns([3, 1, 1])
             
@@ -249,17 +299,14 @@ with tab2:
                 st.caption(f"Note: {row['Note']}")
                 
             with col_search:
-                # Codifica il titolo per renderlo un link web sicuro (es. spazi -> %20)
                 query_string = urllib.parse.quote(row['Titolo'])
                 url_ricerca_imdb = f"https://www.imdb.com/find/?q={query_string}"
-                
-                # Un semplice link formattato a pulsante che punta direttamente alla pagina di ricerca IMDb
                 st.link_button("🔍 Cerca su IMDb", url_ricerca_imdb, use_container_width=True)
                 
             with col_del_futuro:
                 if st.button("❌ Elimina", key=f"del_futuro_{index}", use_container_width=True):
                     df_futuri = df_futuri.drop(index).reset_index(drop=True)
                     salva_dati_futuri(df_futuri)
-                    st.warning("Promemoria eliminato.")
+                    st.warning("Promemoria eliminato da GitHub.")
                     st.rerun()
-                            
+        
